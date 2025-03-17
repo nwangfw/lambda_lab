@@ -1,7 +1,6 @@
 #!/bin/bash
 
 # setup_aibrix_benchmark.sh
-# Script to install Kubernetes, set up Aibrix, deploy DeepSeek-R1-Distill-Llama-8B model
 # Based on https://aibrix.readthedocs.io/latest/getting_started/installation/lambda.html
 
 set -e  # Exit immediately if a command exits with a non-zero status
@@ -40,10 +39,11 @@ fi
 
 # Configuration variables
 AIBRIX_VERSION="v0.2.1"
-MODEL_NAME="deepseek-r1-distill-llama-8b"
+#MODEL_NAME="deepseek-r1-distill-llama-8b"
+MODEL_NAME="llama-2-7b-hf"
 BENCHMARK_OUTPUT_DIR="${SCRIPT_DIR}"
-API_KEY="Replace with your key"  # Using the API key from the deployment file
-HF_TOKEN="Replace with your key"  # HuggingFace token for accessing the model
+API_KEY="replace with your key"  # Using the API key from the deployment file
+HF_TOKEN="replace with your key"   # HuggingFace token for accessing the 
 USE_ALT_PORTS=false  # Flag to determine if we need to use alternative ports
 
 # Script directory and AIBrix repository path
@@ -654,10 +654,10 @@ install_aibrix() {
 }
 
 #######################################
-# 6. Deploy DeepSeek-R1-Distill-Llama-8B model
+# 6. Model Deployment
 #######################################
 deploy_model() {
-  log "Deploying DeepSeek-R1-Distill-Llama-8B model..."
+  log "Deploying ${MODEL_NAME} model..."
   
   # Create directory for KV cache socket
   log "Creating directory for KV cache socket..."
@@ -686,11 +686,11 @@ deploy_model() {
   fi
   
   # Apply the DeepSeek model deployment
-  log "Applying DeepSeek model deployment..."
-  kubectl apply -f "${SCRIPT_DIR}/deepseek-r1-8b.yaml"
+  log "Applying ${MODEL_NAME} model deployment..."
+  kubectl apply -f "${SCRIPT_DIR}/${MODEL_NAME}.yaml"
   
   # Wait for the deployment to be ready
-  log "Waiting for DeepSeek-R1-Distill-Llama-8B deployment to be ready (this may take several minutes)..."
+  log "Waiting for ${MODEL_NAME} deployment to be ready (this may take several minutes)..."
   kubectl wait --for=condition=available --timeout=600s deployment/${MODEL_NAME} || true
   
   # Wait for the pod to be running
@@ -759,43 +759,6 @@ deploy_model() {
   
   # Save the port forwarding PID for later cleanup
   echo $PORT_FORWARD_PID > "${SCRIPT_DIR}/.port_forward.pid"
-  
-  # Run benchmarking if the model is deployed successfully
-  if [ ! -z "$PORT_FORWARD_CHECK" ]; then
-    log "Starting benchmarking for ${MODEL_NAME}..."
-        
-    # Create a timestamp for the log file
-    DATETIME=$(date +"%Y%m%d_%H%M%S")
-    LOG_FILE="${BENCHMARK_OUTPUT_DIR}/${MODEL_NAME}-${DATETIME}.log"
-    
-    # Ensure the log directory is writable
-    if [ ! -w "${BENCHMARK_OUTPUT_DIR}" ]; then
-      warning "Cannot write to ${BENCHMARK_OUTPUT_DIR}. Using /home/ubuntu/lambda_lab/benchmark_results instead."
-      mkdir -p /home/ubuntu/lambda_lab/benchmark_results
-      LOG_FILE="/home/ubuntu/lambda_lab/benchmark_results/${MODEL_NAME}-${DATETIME}.log"
-    fi
-    
-    # Change to the AIBrix GPU optimizer directory
-    cd "${AIBRIX_REPO_PATH}/python/aibrix/aibrix/gpu_optimizer"
-    
-    # Run the benchmark in the background and log the output
-    log "Running benchmark: make benchmark DP=${MODEL_NAME} > ${LOG_FILE} 2>&1"
-    # Create the log file with the current user permissions first
-    touch "${LOG_FILE}" && chmod 666 "${LOG_FILE}"
-    nohup make benchmark DP=${MODEL_NAME} > "${LOG_FILE}" 2>&1 &
-    BENCHMARK_PID=$!
-    
-    # Save the benchmark PID for later reference
-    echo $BENCHMARK_PID > "${SCRIPT_DIR}/.benchmark.pid"
-    
-    log "Benchmark started in background. Log file: ${LOG_FILE}"
-    log "You can monitor the benchmark progress with: tail -f ${LOG_FILE}"
-    
-    # Return to the script directory
-    cd "${SCRIPT_DIR}"
-  else
-    warning "Port forwarding is not working. Skipping benchmark."
-  fi
 }
 
 #######################################
@@ -1134,7 +1097,7 @@ run_benchmark_directly() {
     -e "LLM_API_BASE=http://localhost:8010" \
     --entrypoint bash \
     aibrix/runtime:nightly \
-    -c "aibrix_benchmark -m ${MODEL_NAME} -o ${MODEL_NAME} --input-start 1024 --input-limit 1024 --output-start 16 --output-limit 16 --rate-start 1 --rate-limit 16 --output /usr/local/lib/python3.11/site-packages/aibrix/gpu_optimizer/optimizer/profiling/result/${MODEL_NAME}.jsonl" > "${LOG_FILE}" 2>&1 &
+    -c "aibrix_benchmark -m ${MODEL_NAME} -o ${MODEL_NAME} --input-start 256 --input-limit 256 --output-start 256 --output-limit 256 --rate-start 1 --rate-limit 64 --output /usr/local/lib/python3.11/site-packages/aibrix/gpu_optimizer/optimizer/profiling/result/${MODEL_NAME}.jsonl" > "${LOG_FILE}" 2>&1 &
   
   BENCHMARK_PID=$!
   
@@ -1195,8 +1158,12 @@ main() {
     warning "Model deployment may have issues. Please check the logs."
   }
   
-  log "AIBrix setup with DeepSeek-R1-Distill-Llama-8B model completed successfully."
+  log "AIBrix setup with ${MODEL_NAME} model completed successfully."
   log "The model is now accessible at localhost:8010"
+  
+  # Run benchmark directly after model deployment
+  log "Starting benchmark process..."
+  run_benchmark_directly
   
   # If benchmark is running, provide information about how to check its status
   if [ -f "${SCRIPT_DIR}/.benchmark.pid" ]; then
