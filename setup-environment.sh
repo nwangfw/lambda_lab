@@ -42,8 +42,8 @@ fi
 AIBRIX_VERSION="v0.2.1"
 MODEL_NAME="deepseek-r1-distill-llama-8b"
 BENCHMARK_OUTPUT_DIR="${SCRIPT_DIR}"
-API_KEY="YOUR_API_KEY_HERE"  # Replace with your actual API key when running
-HF_TOKEN="YOUR_HUGGINGFACE_TOKEN_HERE"  # Replace with your actual HuggingFace token when running
+API_KEY="Replace with your key"  # Using the API key from the deployment file
+HF_TOKEN="Replace with your key"  # HuggingFace token for accessing the model
 USE_ALT_PORTS=false  # Flag to determine if we need to use alternative ports
 
 # Script directory and AIBrix repository path
@@ -768,12 +768,21 @@ deploy_model() {
     DATETIME=$(date +"%Y%m%d_%H%M%S")
     LOG_FILE="${BENCHMARK_OUTPUT_DIR}/${MODEL_NAME}-${DATETIME}.log"
     
+    # Ensure the log directory is writable
+    if [ ! -w "${BENCHMARK_OUTPUT_DIR}" ]; then
+      warning "Cannot write to ${BENCHMARK_OUTPUT_DIR}. Using /home/ubuntu/lambda_lab/benchmark_results instead."
+      mkdir -p /home/ubuntu/lambda_lab/benchmark_results
+      LOG_FILE="/home/ubuntu/lambda_lab/benchmark_results/${MODEL_NAME}-${DATETIME}.log"
+    fi
+    
     # Change to the AIBrix GPU optimizer directory
     cd "${AIBRIX_REPO_PATH}/python/aibrix/aibrix/gpu_optimizer"
     
     # Run the benchmark in the background and log the output
     log "Running benchmark: make benchmark DP=${MODEL_NAME} > ${LOG_FILE} 2>&1"
-    nohup make benchmark DP=${MODEL_NAME} > ${LOG_FILE} 2>&1 &
+    # Create the log file with the current user permissions first
+    touch "${LOG_FILE}" && chmod 666 "${LOG_FILE}"
+    nohup make benchmark DP=${MODEL_NAME} > "${LOG_FILE}" 2>&1 &
     BENCHMARK_PID=$!
     
     # Save the benchmark PID for later reference
@@ -867,6 +876,9 @@ cleanup() {
 check_benchmark_status() {
   log "Checking benchmark status..."
   
+  # Use the script directory
+  SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+  
   # Check if benchmark PID file exists
   if [ ! -f "${SCRIPT_DIR}/.benchmark.pid" ]; then
     log "No benchmark process found. It may not have started or has already completed."
@@ -876,12 +888,16 @@ check_benchmark_status() {
   # Get the benchmark PID
   BENCHMARK_PID=$(cat "${SCRIPT_DIR}/.benchmark.pid")
   
+  # Define the results file path
+  RESULTS_DIR="${SCRIPT_DIR}/profiles/results"
+  RESULT_FILE="${RESULTS_DIR}/${MODEL_NAME}.jsonl"
+  
   # Check if the process is still running
   if ps -p $BENCHMARK_PID > /dev/null; then
     log "Benchmark process (PID: $BENCHMARK_PID) is still running."
     
     # Find the most recent log file
-    LATEST_LOG=$(ls -t ${BENCHMARK_OUTPUT_DIR}/${MODEL_NAME}-*.log 2>/dev/null | head -1)
+    LATEST_LOG=$(ls -t ${SCRIPT_DIR}/${MODEL_NAME}-*.log 2>/dev/null | head -1)
     
     if [ -n "$LATEST_LOG" ]; then
       # Get the file size
@@ -896,6 +912,14 @@ check_benchmark_status() {
       COMPLETED_RUNS=$(grep -c "run benchmark with" "$LATEST_LOG")
       log "Completed benchmark runs so far: $COMPLETED_RUNS"
       
+      # Check if results file exists and show its size
+      if [ -f "$RESULT_FILE" ]; then
+        RESULT_SIZE=$(du -h "$RESULT_FILE" | cut -f1)
+        log "Results file exists: $RESULT_FILE (Size: $RESULT_SIZE)"
+      else
+        log "Results file not created yet"
+      fi
+      
       # Show how to monitor the benchmark
       log "To monitor the benchmark in real-time, run: tail -f $LATEST_LOG"
     else
@@ -908,7 +932,7 @@ check_benchmark_status() {
     log "Benchmark process is not running. It has completed or was terminated."
     
     # Find the most recent log file
-    LATEST_LOG=$(ls -t ${BENCHMARK_OUTPUT_DIR}/${MODEL_NAME}-*.log 2>/dev/null | head -1)
+    LATEST_LOG=$(ls -t ${SCRIPT_DIR}/${MODEL_NAME}-*.log 2>/dev/null | head -1)
     
     if [ -n "$LATEST_LOG" ]; then
       # Get the file size
@@ -924,6 +948,18 @@ check_benchmark_status() {
       log "Log file: $LATEST_LOG (Size: $LOG_SIZE)"
       log "Last few lines of the log:"
       tail -n 5 "$LATEST_LOG"
+      
+      # Check if results file exists
+      if [ -f "$RESULT_FILE" ]; then
+        RESULT_SIZE=$(du -h "$RESULT_FILE" | cut -f1)
+        log "Results file created: $RESULT_FILE (Size: $RESULT_SIZE)"
+        
+        # Show a sample of the results
+        log "Sample of benchmark results:"
+        head -n 3 "$RESULT_FILE"
+      else
+        log "No results file found at $RESULT_FILE"
+      fi
       
       # Count completed benchmark runs
       COMPLETED_RUNS=$(grep -c "run benchmark with" "$LATEST_LOG")
@@ -945,6 +981,9 @@ check_benchmark_status() {
 wait_for_benchmark() {
   log "Waiting for benchmark to complete..."
   
+  # Use the script directory
+  SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+  
   # Check if benchmark PID file exists
   if [ ! -f "${SCRIPT_DIR}/.benchmark.pid" ]; then
     log "No benchmark process found. It may not have started or has already completed."
@@ -955,15 +994,20 @@ wait_for_benchmark() {
   BENCHMARK_PID=$(cat "${SCRIPT_DIR}/.benchmark.pid")
   
   # Find the log file
-  LATEST_LOG=$(ls -t ${BENCHMARK_OUTPUT_DIR}/${MODEL_NAME}-*.log 2>/dev/null | head -1)
+  LATEST_LOG=$(ls -t ${SCRIPT_DIR}/${MODEL_NAME}-*.log 2>/dev/null | head -1)
   
   if [ -z "$LATEST_LOG" ]; then
     log "No log file found. Cannot monitor benchmark progress."
     return 1
   fi
   
+  # Define the results file path
+  RESULTS_DIR="${SCRIPT_DIR}/profiles/results"
+  RESULT_FILE="${RESULTS_DIR}/${MODEL_NAME}.jsonl"
+  
   log "Monitoring benchmark progress. Press Ctrl+C to stop monitoring (benchmark will continue running)."
   log "Log file: $LATEST_LOG"
+  log "Results will be saved to: $RESULT_FILE"
   
   # Wait for the process to complete while showing progress
   while ps -p $BENCHMARK_PID > /dev/null; do
@@ -974,6 +1018,14 @@ wait_for_benchmark() {
     # Count completed benchmark runs
     COMPLETED_RUNS=$(grep -c "run benchmark with" "$LATEST_LOG")
     echo "Completed benchmark runs so far: $COMPLETED_RUNS"
+    
+    # Check if results file exists and show its size
+    if [ -f "$RESULT_FILE" ]; then
+      RESULT_SIZE=$(du -h "$RESULT_FILE" | cut -f1)
+      echo "Results file size: $RESULT_SIZE"
+    else
+      echo "Results file not created yet"
+    fi
     
     # Wait for a while before checking again
     echo "Checking again in 30 seconds... (Press Ctrl+C to stop monitoring)"
@@ -989,6 +1041,18 @@ wait_for_benchmark() {
     log "Benchmark may have terminated unexpectedly. Check the log file for errors."
   fi
   
+  # Check if results file exists
+  if [ -f "$RESULT_FILE" ]; then
+    RESULT_SIZE=$(du -h "$RESULT_FILE" | cut -f1)
+    log "Results file created: $RESULT_FILE (Size: $RESULT_SIZE)"
+    
+    # Show a sample of the results
+    log "Sample of benchmark results:"
+    head -n 3 "$RESULT_FILE"
+  else
+    log "No results file found at $RESULT_FILE"
+  fi
+  
   # Count total completed benchmark runs
   COMPLETED_RUNS=$(grep -c "run benchmark with" "$LATEST_LOG")
   log "Total completed benchmark runs: $COMPLETED_RUNS"
@@ -997,6 +1061,91 @@ wait_for_benchmark() {
   rm -f "${SCRIPT_DIR}/.benchmark.pid"
   
   return 0
+}
+
+#######################################
+# Run benchmark directly
+#######################################
+run_benchmark_directly() {
+  log "Running benchmark directly..."
+  
+  # Use the script directory for benchmark results instead of a fixed path
+  SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+  
+  # Create a timestamp for the log file
+  DATETIME=$(date +"%Y%m%d_%H%M%S")
+  LOG_FILE="${SCRIPT_DIR}/${MODEL_NAME}-${DATETIME}.log"
+  
+  # Create the log file with the current user permissions
+  touch "${LOG_FILE}" && chmod 666 "${LOG_FILE}"
+  
+  # Define results directory path (but don't create it)
+  RESULTS_DIR="${SCRIPT_DIR}/profiles/results"
+  
+  # Check if port forwarding is active
+  PORT_CHECK=$(ss -tulpn | grep ":8010 " 2>/dev/null || lsof -i :8010 -t 2>/dev/null)
+  if [ -z "$PORT_CHECK" ]; then
+    warning "Port 8010 is not in use. Setting up port forwarding..."
+    
+    # Check if there's a pod running
+    POD_NAME=$(kubectl get pods -l model.aibrix.ai/name=${MODEL_NAME} -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || echo "")
+    
+    if [ ! -z "$POD_NAME" ]; then
+      log "Found model pod: $POD_NAME. Setting up port forwarding..."
+      kubectl port-forward pod/${POD_NAME} 8010:8000 &
+      PORT_FORWARD_PID=$!
+      
+      # Save the port forwarding PID for later cleanup
+      echo $PORT_FORWARD_PID > "${SCRIPT_DIR}/.port_forward.pid"
+      
+      # Wait for port forwarding to be established
+      sleep 5
+      
+      # Check if port forwarding is working
+      PORT_FORWARD_CHECK=$(ss -tulpn | grep ":8010 " 2>/dev/null || lsof -i :8010 -t 2>/dev/null)
+      
+      if [ -z "$PORT_FORWARD_CHECK" ]; then
+        error "Port forwarding failed. Cannot access the model."
+      else
+        log "Port forwarding established. Model is accessible at localhost:8010"
+      fi
+    else
+      error "No model pod found. Please run the setup script first."
+    fi
+  else
+    log "Port 8010 is in use. Assuming model is accessible."
+  fi
+  
+  # Create the results directory if it doesn't exist
+  mkdir -p "${RESULTS_DIR}"
+  
+  # Define the result file path
+  RESULT_FILE="${RESULTS_DIR}/${MODEL_NAME}.jsonl"
+  
+  # Run the benchmark using docker directly with host network
+  log "Running benchmark directly. Log file: ${LOG_FILE}"
+  log "Results will be saved to: ${RESULT_FILE}"
+  
+  # Run the container with the benchmark command - map the default output directory without specifying --output
+  docker run --rm --network=host \
+    -v "${RESULTS_DIR}:/usr/local/lib/python3.11/site-packages/aibrix/gpu_optimizer/optimizer/profiling/result" \
+    -e "MODEL_NAME=${MODEL_NAME}" \
+    -e "LLM_API_KEY=${API_KEY}" \
+    -e "LLM_API_BASE=http://localhost:8010" \
+    --entrypoint bash \
+    aibrix/runtime:nightly \
+    -c "aibrix_benchmark -m ${MODEL_NAME} -o ${MODEL_NAME} --input-start 1024 --input-limit 1024 --output-start 16 --output-limit 16 --rate-start 1 --rate-limit 16 --output /usr/local/lib/python3.11/site-packages/aibrix/gpu_optimizer/optimizer/profiling/result/${MODEL_NAME}.jsonl" > "${LOG_FILE}" 2>&1 &
+  
+  BENCHMARK_PID=$!
+  
+  # Save the benchmark PID for later reference
+  echo $BENCHMARK_PID > "${SCRIPT_DIR}/.benchmark.pid"
+  
+  log "Benchmark started in background. Log file: ${LOG_FILE}"
+  log "Results will be saved to: ${RESULT_FILE}"
+  
+  # Update BENCHMARK_OUTPUT_DIR for wait_for_benchmark function
+  BENCHMARK_OUTPUT_DIR="${SCRIPT_DIR}"
 }
 
 #######################################
@@ -1070,6 +1219,8 @@ elif [ "$1" = "check-benchmark" ]; then
   check_benchmark_status
 elif [ "$1" = "wait-benchmark" ]; then
   wait_for_benchmark
+elif [ "$1" = "run-benchmark" ]; then
+  run_benchmark_directly
 else
   main
 fi
