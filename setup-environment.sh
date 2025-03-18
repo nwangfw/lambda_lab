@@ -42,8 +42,8 @@ AIBRIX_VERSION="v0.2.1"
 #MODEL_NAME="deepseek-r1-distill-llama-8b"
 MODEL_NAME="llama-2-7b-hf"
 BENCHMARK_OUTPUT_DIR="${SCRIPT_DIR}"
-API_KEY="replace with your key"  # Using the API key from the deployment file
-HF_TOKEN="replace with your key"   # HuggingFace token for accessing the 
+API_KEY="replace with your key"  # Using the API key from the deployment file
+HF_TOKEN="replace with your key"   # HuggingFace token for accessing the 
 USE_ALT_PORTS=false  # Flag to determine if we need to use alternative ports
 
 # Script directory and AIBrix repository path
@@ -154,6 +154,51 @@ install_dependencies() {
   
   # Source bashrc to update environment variables
   source ~/.bashrc
+  
+  # Check if nvkind is installed
+  if ! command -v nvkind &> /dev/null; then
+    log "nvkind not found after AIBrix installation. Installing manually..."
+    
+    # Create local bin directory if it doesn't exist
+    mkdir -p ~/.local/bin
+    
+    # Ensure ~/.local/bin is in PATH
+    if [[ ":$PATH:" != *":$HOME/.local/bin:"* ]]; then
+      log "Adding ~/.local/bin to PATH..."
+      echo 'export PATH=$HOME/.local/bin:$PATH' >> ~/.bashrc
+      export PATH="$HOME/.local/bin:$PATH"
+    fi
+    
+    # Download nvkind binary
+    log "Downloading nvkind binary..."
+    curl -L -o ~/nvkind-linux-amd64.tar.gz https://github.com/Jeffwan/kind-with-gpus-examples/releases/download/v0.1.0/nvkind-linux-amd64.tar.gz
+    
+    if [ $? -ne 0 ]; then
+      error "Failed to download nvkind binary."
+    fi
+    
+    # Extract nvkind binary
+    log "Extracting nvkind binary..."
+    tar -xzvf ~/nvkind-linux-amd64.tar.gz -C ~/.local/bin/ || error "Failed to extract nvkind binary."
+    
+    # Make nvkind executable and move to the correct name
+    log "Setting up nvkind..."
+    chmod +x ~/.local/bin/nvkind-linux-amd64 || error "Failed to make nvkind executable."
+    mv ~/.local/bin/nvkind-linux-amd64 ~/.local/bin/nvkind || error "Failed to rename nvkind binary."
+    
+    # Verify nvkind is installed
+    if ! command -v nvkind &> /dev/null; then
+      error "nvkind installation failed. Please check the logs."
+    else
+      log "nvkind installed successfully."
+    fi
+  else
+    log "nvkind is already installed."
+  fi
+  
+  # Verify nvkind version
+  log "Checking nvkind version..."
+  nvkind --version || warning "Failed to check nvkind version, but continuing anyway."
   
   # Return to script directory
   cd "${SCRIPT_DIR}"
@@ -304,9 +349,50 @@ check_required_ports() {
 create_cluster() {
   log "Creating nvkind cluster..."
   
+  # Check if nvkind is installed
+  if ! command -v nvkind &> /dev/null; then
+    # Attempt to install nvkind again
+    log "nvkind not found. Attempting to install it now..."
+    
+    # Create local bin directory if it doesn't exist
+    mkdir -p ~/.local/bin
+    
+    # Ensure ~/.local/bin is in PATH
+    if [[ ":$PATH:" != *":$HOME/.local/bin:"* ]]; then
+      log "Adding ~/.local/bin to PATH..."
+      echo 'export PATH=$HOME/.local/bin:$PATH' >> ~/.bashrc
+      export PATH="$HOME/.local/bin:$PATH"
+    fi
+    
+    # Download and install nvkind
+    log "Downloading nvkind binary..."
+    curl -L -o ~/nvkind-linux-amd64.tar.gz https://github.com/Jeffwan/kind-with-gpus-examples/releases/download/v0.1.0/nvkind-linux-amd64.tar.gz || error "Failed to download nvkind binary."
+    log "Extracting nvkind binary..."
+    tar -xzvf ~/nvkind-linux-amd64.tar.gz -C ~/.local/bin/ || error "Failed to extract nvkind binary."
+    log "Setting up nvkind..."
+    chmod +x ~/.local/bin/nvkind-linux-amd64 || error "Failed to make nvkind executable."
+    mv ~/.local/bin/nvkind-linux-amd64 ~/.local/bin/nvkind || error "Failed to rename nvkind binary."
+    
+    # Verify nvkind is installed
+    if ! command -v nvkind &> /dev/null; then
+      error "Failed to install nvkind. Cannot create cluster."
+    fi
+    
+    log "nvkind installed successfully."
+  fi
+  
   # Check if Docker is running
   if ! docker info &>/dev/null; then
     error "Docker is not running. Please start Docker and try again."
+  fi
+  
+  # Verify nvkind is working correctly
+  log "Verifying nvkind functionality..."
+  if ! nvkind --help &>/dev/null; then
+    warning "nvkind command seems to be installed but may not be working correctly."
+    log "Attempting to continue anyway..."
+  else
+    log "nvkind is working correctly."
   fi
   
   # Check Docker memory and CPU resources

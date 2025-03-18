@@ -2,13 +2,14 @@
 
 This is a repository for Lambda Lab projects.
 
-## Description
-
-Add your project description here.
-
 ## Setup
 
-Instructions for setting up the project will go here.
+Instructions for running the script.
+
+```
+cd lambda-lab
+sudo ./setup-environment.sh
+```
 
 ## Usage
 
