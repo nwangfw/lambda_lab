@@ -43,7 +43,7 @@ AIBRIX_VERSION="v0.2.1"
 MODEL_NAME="llama-2-7b-hf"
 BENCHMARK_OUTPUT_DIR="${SCRIPT_DIR}"
 API_KEY="replace with your key"  # Using the API key from the deployment file
-HF_TOKEN="replace with your key"   # HuggingFace token for accessing the 
+HF_TOKEN="replace with your key"   # HuggingFace token for accessing the model
 USE_ALT_PORTS=false  # Flag to determine if we need to use alternative ports
 
 # Script directory and AIBrix repository path
@@ -465,6 +465,98 @@ create_cluster() {
   cd "${SCRIPT_DIR}"
   
   log "Kubernetes cluster created successfully."
+}
+
+#######################################
+# Fix kubectl configuration
+#######################################
+fix_kubectl_config() {
+  log "Fixing kubectl configuration for NVkind cluster..."
+  
+  # Find the control-plane container
+  CONTROL_PLANE_CONTAINER=$(docker ps --filter "name=control-plane" --format "{{.Names}}" | grep -E 'nvkind|kind' | head -n 1)
+  
+  if [ -z "$CONTROL_PLANE_CONTAINER" ]; then
+    warning "Could not find control-plane container. Kubectl configuration may not work correctly."
+    return 1
+  fi
+  
+  log "Found control-plane container: $CONTROL_PLANE_CONTAINER"
+  
+  # Get the port mapping for the control-plane API server (usually 6443)
+  API_PORT_MAPPING=$(docker port $CONTROL_PLANE_CONTAINER 6443/tcp | head -n 1)
+  
+  if [ -z "$API_PORT_MAPPING" ]; then
+    warning "Could not find API port mapping for the control-plane container."
+    warning "Trying alternative method to get port mapping..."
+    
+    # Alternative method to get port mapping
+    API_PORT_MAPPING=$(docker inspect -f '{{range $p, $conf := .NetworkSettings.Ports}}{{if eq $p "6443/tcp"}}{{range $conf}}127.0.0.1:{{.HostPort}}{{end}}{{end}}{{end}}' $CONTROL_PLANE_CONTAINER)
+    
+    if [ -z "$API_PORT_MAPPING" ]; then
+      warning "Still could not find API port mapping. Using default port mapping."
+      API_PORT_MAPPING="127.0.0.1:6443"
+    fi
+  fi
+  
+  # Extract host and port from mapping
+  API_HOST=$(echo $API_PORT_MAPPING | cut -d':' -f1)
+  API_PORT=$(echo $API_PORT_MAPPING | cut -d':' -f2)
+  
+  # If host is empty or 0.0.0.0, use 127.0.0.1
+  if [ -z "$API_HOST" ] || [ "$API_HOST" = "0.0.0.0" ]; then
+    API_HOST="127.0.0.1"
+  fi
+  
+  log "Using API server address: $API_HOST:$API_PORT"
+  
+  # Extract cluster name from control-plane container name
+  CLUSTER_NAME=$(echo $CONTROL_PLANE_CONTAINER | sed -E 's/-(control-plane|master).*$//')
+  
+  if [ -z "$CLUSTER_NAME" ]; then
+    CLUSTER_NAME="nvkind"
+    warning "Could not extract cluster name from container name. Using '$CLUSTER_NAME' as fallback."
+  fi
+  
+  log "Cluster name: $CLUSTER_NAME"
+  
+  # Get kubeconfig from the container
+  log "Extracting kubeconfig from control-plane container..."
+  mkdir -p $HOME/.kube
+  docker exec $CONTROL_PLANE_CONTAINER cat /etc/kubernetes/admin.conf > $HOME/nvkind-kubeconfig
+  
+  if [ ! -f "$HOME/nvkind-kubeconfig" ]; then
+    warning "Failed to extract kubeconfig from container. Kubectl configuration may not work correctly."
+    return 1
+  fi
+  
+  # Modify the kubeconfig to use the correct server address
+  log "Updating kubeconfig with correct server address..."
+  SERVER_URL="https://${API_HOST}:${API_PORT}"
+  
+  # Use sed to replace the server URL in the kubeconfig
+  if [ "$OS" == "Darwin" ]; then
+    # macOS sed requires an empty string for -i
+    sed -i '' -e "s|server:.*|server: ${SERVER_URL}|g" $HOME/nvkind-kubeconfig
+  else
+    # Linux sed works directly with -i
+    sed -i "s|server:.*|server: ${SERVER_URL}|g" $HOME/nvkind-kubeconfig
+  fi
+  
+  # Set KUBECONFIG environment variable to use this config
+  export KUBECONFIG="$HOME/nvkind-kubeconfig"
+  
+  # Copy to the default location
+  cp $HOME/nvkind-kubeconfig $HOME/.kube/config
+  
+  # Test if the configuration works
+  log "Testing kubectl configuration..."
+  if kubectl get nodes &>/dev/null; then
+    log "Kubectl configuration updated successfully. You can now use kubectl commands."
+  else
+    warning "Kubectl configuration update succeeded but kubectl test failed. Manual configuration may be needed."
+    kubectl config view
+  fi
 }
 
 #######################################
@@ -1183,7 +1275,7 @@ run_benchmark_directly() {
     -e "LLM_API_BASE=http://localhost:8010" \
     --entrypoint bash \
     aibrix/runtime:nightly \
-    -c "aibrix_benchmark -m ${MODEL_NAME} -o ${MODEL_NAME} --input-start 256 --input-limit 256 --output-start 256 --output-limit 256 --rate-start 1 --rate-limit 64 --output /usr/local/lib/python3.11/site-packages/aibrix/gpu_optimizer/optimizer/profiling/result/${MODEL_NAME}.jsonl" > "${LOG_FILE}" 2>&1 &
+    -c "aibrix_benchmark -m ${MODEL_NAME} -o ${MODEL_NAME} --input-start 4 --input-limit 8196 --output-start 4 --output-limit 2048 --rate-start 1 --rate-limit 64 --output /usr/local/lib/python3.11/site-packages/aibrix/gpu_optimizer/optimizer/profiling/result/${MODEL_NAME}.jsonl" > "${LOG_FILE}" 2>&1 &
   
   BENCHMARK_PID=$!
   
@@ -1232,6 +1324,11 @@ main() {
     error "Failed to create Kubernetes cluster. Please check the logs and try again."
   }
   
+  # Fix kubectl configuration before continuing with other steps
+  fix_kubectl_config || {
+    warning "Failed to fix kubectl configuration. Attempting to continue anyway..."
+  }
+  
   setup_gpu_operator || {
     warning "GPU operator setup may have issues. Attempting to continue..."
   }
@@ -1274,6 +1371,8 @@ elif [ "$1" = "wait-benchmark" ]; then
   wait_for_benchmark
 elif [ "$1" = "run-benchmark" ]; then
   run_benchmark_directly
+elif [ "$1" = "fix-kubectl" ]; then
+  fix_kubectl_config
 else
   main
 fi
