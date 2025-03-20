@@ -40,7 +40,8 @@ fi
 # Configuration variables
 AIBRIX_VERSION="v0.2.1"
 #MODEL_NAME="deepseek-r1-distill-llama-8b"
-MODEL_NAME="llama-2-7b-hf"
+#MODEL_NAME="llama-2-7b-hf"
+MODEL_NAME="llama3-8b"
 BENCHMARK_OUTPUT_DIR="${SCRIPT_DIR}"
 API_KEY="replace with your key"  # Using the API key from the deployment file
 HF_TOKEN="replace with your key"   # HuggingFace token for accessing the model
@@ -154,6 +155,17 @@ install_dependencies() {
   
   # Source bashrc to update environment variables
   source ~/.bashrc
+  
+  # Verify kubectl installation after AIBrix setup
+  if ! command -v kubectl &> /dev/null; then
+    warning "kubectl not found in PATH after AIBrix installation. Attempting to fix..."
+    fix_kubectl_installation
+  elif ! kubectl version --client &> /dev/null; then
+    warning "kubectl found but not working properly. Attempting to fix..."
+    fix_kubectl_installation
+  else
+    log "kubectl is properly installed and working."
+  fi
   
   # Check if nvkind is installed
   if ! command -v nvkind &> /dev/null; then
@@ -473,6 +485,63 @@ create_cluster() {
 fix_kubectl_config() {
   log "Fixing kubectl configuration for NVkind cluster..."
   
+  # First make sure kubectl is in the PATH by creating a symlink if needed
+  if ! command -v kubectl &> /dev/null; then
+    log "kubectl command not found. Looking for kubectl binary..."
+    KUBECTL_PATH=$(find / -name kubectl -type f 2>/dev/null | head -n 1)
+    
+    if [ -z "$KUBECTL_PATH" ]; then
+      warning "kubectl binary not found. Attempting to install kubectl..."
+      # Try to install kubectl
+      curl -LO "https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
+      chmod +x ./kubectl
+      sudo mv ./kubectl /usr/local/bin/kubectl
+      # Make sure the binary is executable and has proper permissions
+      sudo chmod +x /usr/local/bin/kubectl
+      sudo chown root:root /usr/local/bin/kubectl
+      log "kubectl installed to /usr/local/bin/kubectl. Verifying installation..."
+      
+      # Verify the installation
+      if /usr/local/bin/kubectl version --client &>/dev/null; then
+        log "kubectl client installation verified."
+      else
+        warning "kubectl installation seems incomplete. Trying again with different permissions..."
+        sudo chmod 755 /usr/local/bin/kubectl
+        if /usr/local/bin/kubectl version --client &>/dev/null; then
+          log "kubectl client installation verified after permission fix."
+        else
+          warning "kubectl installation issues persist. Will try to create a user-level copy."
+          mkdir -p $HOME/.local/bin
+          curl -LO "https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
+          chmod +x ./kubectl
+          mv ./kubectl $HOME/.local/bin/kubectl
+          # Add to PATH if not already there
+          if [[ ":$PATH:" != *":$HOME/.local/bin:"* ]]; then
+            echo 'export PATH=$HOME/.local/bin:$PATH' >> $HOME/.bashrc
+            log "Added $HOME/.local/bin to PATH in .bashrc. Please run 'source ~/.bashrc' after this script completes."
+            # Also add to the current PATH for this session
+            export PATH="$HOME/.local/bin:$PATH"
+          fi
+        fi
+      fi
+    else
+      log "Found kubectl at $KUBECTL_PATH. Creating symlink in /usr/local/bin..."
+      sudo ln -sf "$KUBECTL_PATH" /usr/local/bin/kubectl
+      sudo chmod +x /usr/local/bin/kubectl
+      
+      # Verify the symlink works
+      if ! /usr/local/bin/kubectl version --client &>/dev/null; then
+        warning "kubectl symlink not working properly. Creating a direct copy instead..."
+        sudo rm /usr/local/bin/kubectl
+        sudo cp "$KUBECTL_PATH" /usr/local/bin/kubectl
+        sudo chmod +x /usr/local/bin/kubectl
+      fi
+    fi
+  fi
+  
+  # Create .kube directory if it doesn't exist
+  mkdir -p $HOME/.kube
+  
   # Find the control-plane container
   CONTROL_PLANE_CONTAINER=$(docker ps --filter "name=control-plane" --format "{{.Names}}" | grep -E 'nvkind|kind' | head -n 1)
   
@@ -522,7 +591,6 @@ fix_kubectl_config() {
   
   # Get kubeconfig from the container
   log "Extracting kubeconfig from control-plane container..."
-  mkdir -p $HOME/.kube
   docker exec $CONTROL_PLANE_CONTAINER cat /etc/kubernetes/admin.conf > $HOME/nvkind-kubeconfig
   
   if [ ! -f "$HOME/nvkind-kubeconfig" ]; then
@@ -534,20 +602,28 @@ fix_kubectl_config() {
   log "Updating kubeconfig with correct server address..."
   SERVER_URL="https://${API_HOST}:${API_PORT}"
   
-  # Use sed to replace the server URL in the kubeconfig
-  if [ "$OS" == "Darwin" ]; then
-    # macOS sed requires an empty string for -i
-    sed -i '' -e "s|server:.*|server: ${SERVER_URL}|g" $HOME/nvkind-kubeconfig
+  # Get the current server URL to replace
+  CURRENT_SERVER_URL=$(grep "server:" $HOME/nvkind-kubeconfig | awk '{print $2}')
+  
+  if [ -z "$CURRENT_SERVER_URL" ]; then
+    warning "Could not find server URL in kubeconfig. Manual configuration may be needed."
   else
-    # Linux sed works directly with -i
-    sed -i "s|server:.*|server: ${SERVER_URL}|g" $HOME/nvkind-kubeconfig
+    # Use sed to replace the server URL in the kubeconfig
+    if [ "$OS" == "Darwin" ]; then
+      # macOS sed requires an empty string for -i
+      sed -i '' -e "s|${CURRENT_SERVER_URL}|${SERVER_URL}|g" $HOME/nvkind-kubeconfig
+    else
+      # Linux sed works directly with -i
+      sed -i "s|${CURRENT_SERVER_URL}|${SERVER_URL}|g" $HOME/nvkind-kubeconfig
+    fi
   fi
   
   # Set KUBECONFIG environment variable to use this config
   export KUBECONFIG="$HOME/nvkind-kubeconfig"
   
-  # Copy to the default location
+  # Copy to the default location with proper permissions
   cp $HOME/nvkind-kubeconfig $HOME/.kube/config
+  chmod 600 $HOME/.kube/config
   
   # Test if the configuration works
   log "Testing kubectl configuration..."
@@ -555,6 +631,10 @@ fix_kubectl_config() {
     log "Kubectl configuration updated successfully. You can now use kubectl commands."
   else
     warning "Kubectl configuration update succeeded but kubectl test failed. Manual configuration may be needed."
+    log "Please check the following:"
+    log "1. Make sure kubectl is installed and in your PATH"
+    log "2. Make sure the kubeconfig at $HOME/.kube/config has the correct server address"
+    log "3. Make sure the control-plane container is running with the API server accessible"
     kubectl config view
   fi
 }
@@ -1290,6 +1370,68 @@ run_benchmark_directly() {
 }
 
 #######################################
+# Fix kubectl installation issues
+#######################################
+fix_kubectl_installation() {
+  log "Fixing kubectl installation issues..."
+  
+  # Check if kubectl is already installed and working
+  if command -v kubectl &> /dev/null && kubectl version --client &> /dev/null; then
+    log "kubectl is already installed and working."
+    return 0
+  fi
+  
+  log "kubectl is not working properly. Attempting to fix..."
+  
+  # Remove any broken symlinks or non-working kubectl
+  if [ -L /usr/local/bin/kubectl ]; then
+    log "Removing broken kubectl symlink..."
+    sudo rm /usr/local/bin/kubectl
+  elif [ -f /usr/local/bin/kubectl ]; then
+    log "Removing non-working kubectl binary..."
+    sudo rm /usr/local/bin/kubectl
+  fi
+  
+  # Install a fresh copy of kubectl
+  log "Installing a fresh copy of kubectl..."
+  curl -LO "https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
+  chmod +x ./kubectl
+  sudo mv ./kubectl /usr/local/bin/kubectl
+  sudo chmod 755 /usr/local/bin/kubectl
+  
+  # Verify the installation
+  if kubectl version --client &> /dev/null; then
+    log "kubectl successfully installed and verified."
+  else
+    log "kubectl installation still has issues. Attempting alternative installation in user directory..."
+    
+    # Try installing in user directory
+    mkdir -p $HOME/.local/bin
+    curl -LO "https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
+    chmod +x ./kubectl
+    mv ./kubectl $HOME/.local/bin/kubectl
+    
+    # Add to PATH if not already there
+    if [[ ":$PATH:" != *":$HOME/.local/bin:"* ]]; then
+      echo 'export PATH=$HOME/.local/bin:$PATH' >> $HOME/.bashrc
+      log "Added $HOME/.local/bin to PATH in .bashrc. Please run 'source ~/.bashrc' after this script completes."
+      # Also add to the current PATH for this session
+      export PATH="$HOME/.local/bin:$PATH"
+    fi
+    
+    # Final verification
+    if $HOME/.local/bin/kubectl version --client &> /dev/null; then
+      log "kubectl successfully installed in user directory and verified."
+    else
+      error "kubectl installation failed. Please check your system configuration."
+    fi
+  fi
+  
+  log "If you're still having issues with kubectl, try running: source ~/.bashrc"
+  log "kubectl installation fix completed."
+}
+
+#######################################
 # Main execution
 #######################################
 main() {
@@ -1373,6 +1515,8 @@ elif [ "$1" = "run-benchmark" ]; then
   run_benchmark_directly
 elif [ "$1" = "fix-kubectl" ]; then
   fix_kubectl_config
+elif [ "$1" = "fix-kubectl-install" ]; then
+  fix_kubectl_installation
 else
   main
 fi
